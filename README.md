@@ -1,6 +1,6 @@
 # LSZ
 
-## if u find error pls open issue with ur full err output
+## if u find error pls open issue with ur full traceback
 
 ### `ls` but bettr
 
@@ -74,8 +74,4 @@ make clean
 * More detailed file metadata
 * Optional disk-usage mode
 * Configuration file
-
-## 📄 License
-
-See the repository for licensing information.
 
