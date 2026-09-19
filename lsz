@@ -3,130 +3,188 @@ import sys
 import os
 import time
 import shutil
+import sqlite3
+from pathlib import Path
 
 RESET = "\033[0m"
 
+global time_till_redo_cache
+time_till_redo_cache = 8 * 86400 # s
+
+class Cache:
+    def __init__(self, path: str):
+        home = Path.home()
+        try:
+            Path(f"{home}/.cache/LSZ/{path}").touch(exist_ok=True)
+        except FileNotFoundError:
+            Path(f"{home}/.cache/LSZ").mkdir(exist_ok=True, parents=True)
+            Path(f"{home}/.cache/LSZ/{path}").touch(exist_ok=True)
+        self.path = path
+        self.db = sqlite3.connect(f"{home}/.cache/LSZ/{path}")
+        self.db.execute("""
+CREATE TABLE IF NOT EXISTS dirsize_cache (
+    path TEXT PRIMARY KEY,
+    mtime REAL NOT NULL,
+    size INTEGER NOT NULL,
+    checked_at REAL NOT NULL
+);
+        """)
+
+    def put(
+        self, path: str, size: int, modified_time: int, checked_at: float = None
+    ):
+        if checked_at == None:
+            checked_at = time.time()
+        self.db.execute(
+            """INSERT OR REPLACE INTO dirsize_cache (path, size, mtime, checked_at) VALUES (?, ?, ?, ?)""",
+            (path, size, modified_time, checked_at),
+        )
+
+    def puts(self, items: list[tuple[str, int, float, float]]):
+        self.db.executemany(
+            "INSERT OR REPLACE INTO dirsize_cache (path, size, mtime, checked_at) VALUES (?, ?, ?, ?)",
+            items,
+        )
+        self.db.commit()
+
+    def get(self, path: str, mtime):
+        out = self.db.execute(
+            """SELECT mtime, size, checked_at FROM dirsize_cache WHERE path = ?""",
+            (path,),
+        )
+        out = out.fetchone()
+        if not out:
+            return None
+        else:
+            out = list(out)
+            out.insert(0, path)
+        if (out[1] != mtime) or ((time.time() - out[3]) > time_till_redo_cache):
+            return None
+        return out[2]
+
 ls_colors_str = os.environ.get("LS_COLORS", "di=01;34:ln=01;36:ex=01;32:fi=00")
 class Color:
-	MAP = dict(item.split("=", 1) for item in ls_colors_str.split(":") if "=" in item)
+    MAP = dict(item.split("=", 1) for item in ls_colors_str.split(":") if "=" in item)
 
-	@staticmethod
-	def get(key, fallback="00"):
-		code = Color.MAP.get(key, fallback)
-		return f"\033[{code}m"
+    @staticmethod
+    def get(key, fallback="00"):
+        code = Color.MAP.get(key, fallback)
+        return f"\033[{code}m"
 
 def color_key(path, is_directory):
-	if is_directory:
-		return "di"
+    if is_directory:
+        return "di"
 
-	try:
-		if os.path.islink(path):
-			return "ln"
-		if os.access(path, os.X_OK):
-			return "ex"
+    try:
+        if os.path.islink(path):
+            return "ln"
+        if os.access(path, os.X_OK):
+            return "ex"
 
-	except OSError:
-		pass
+    except OSError:
+        pass
 
-	return "fi"
+    return "fi"
 
 def colored_name(path, is_directory, color):
-	name = os.path.basename(path)
+    name = os.path.basename(path)
 
-	if not color:
-		return name
+    if not color:
+        return name
 
-	key = color_key(path, is_directory)
+    key = color_key(path, is_directory)
 
-	return Color.get(key) + name + RESET
+    return Color.get(key) + name + RESET
 
 def human_size(size):
-	if size < 1000:
-		return f"{size}B"
+    if size < 1000:
+        return f"{size}B"
 
-	if size < 1000**2:
-		return f"{size / 1000:.1f}KB"
+    if size < 1000**2:
+        return f"{size / 1000:.1f}KB"
 
-	if size < 1000**3:
-		return f"{size / 1000**2:.1f}MB"
+    if size < 1000**3:
+        return f"{size / 1000**2:.1f}MB"
 
-	if size < 1000**4:
-		return f"{size / 1000**3:.1f}GB"
+    if size < 1000**4:
+        return f"{size / 1000**3:.1f}GB"
 
-	return f"{size / 1000**4:.1f}TB"
+    return f"{size / 1000**4:.1f}TB"
 
 def human_speed(value):
-	if value < 1000:
-		return f"{value:.0f}B/s"
+    if value < 1000:
+        return f"{value:.0f}B/s"
 
-	if value < 1000**2:
-		return f"{value / 1000:.1f}kB/s"
+    if value < 1000**2:
+        return f"{value / 1000:.1f}kB/s"
 
-	if value < 1000**3:
-		return f"{value / 1000**2:.1f}MB/s"
+    if value < 1000**3:
+        return f"{value / 1000**2:.1f}MB/s"
 
-	return f"{value / 1000**3:.1f}GB/s"
+    return f"{value / 1000**3:.1f}GB/s"
 
 def scan_speed(state):
-	elapsed = time.monotonic() - state.start_time
+    elapsed = time.monotonic() - state.start_time
 
-	if elapsed <= 0:
-		return 0
+    if elapsed <= 0:
+        return 0
 
-	return state.scanned_entries / elapsed
+    return state.scanned_entries / elapsed
 
 def display_path(path):
-	path = os.path.abspath(path)
-	home = os.path.expanduser("~")
+    path = os.path.abspath(path)
+    home = os.path.expanduser("~")
 
-	if path == home:
-		return "~"
+    if path == home:
+        return "~"
 
-	if path.startswith(home + os.sep):
-		return "~" + path[len(home) :]
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
 
-	return path
+    return path
 
 def sort_results(results):
-	results.sort(key=lambda x: (not x[2], -x[1]))
+    results.sort(key=lambda x: (not x[2], -x[1]))
 
 class ScanState:
-	def __init__(self, top_total):
-		self.files = 0
-		self.dirs = 0
-		self.bytes = 0
+    def __init__(self, top_total):
+        self.files = 0
+        self.dirs = 0
+        self.bytes = 0
 
-		self.current = ""
+        self.current = ""
 
-		self.scanned_entries = 0
+        self.scanned_entries = 0
 
-		self.start_time = time.monotonic()
+        self.start_time = time.monotonic()
 
-		self.top_done = 0
-		self.top_total = top_total
+        self.top_done = 0
+        self.top_total = top_total
 
-		self.results = []
+        self.results = []
 
-		self.discovery_lines = []
+        self.discovery_lines = []
 
-		self.printQ = 0
+        self.printQ = 0
 
 def print_results(results, color):
-	if not results:
-		return
+    if not results:
+        return
 
-	names = [os.path.basename(path) for path, _, _ in results]
-	longest = max(len(name) for name in names)
-	for path, size, is_directory in results:
-		raw_name = os.path.basename(path)
-		name = colored_name(path, is_directory, color)
-		padding = " " * (longest - len(raw_name) + 2)
-		print(name + padding + human_size(size))
+    names = [os.path.basename(path) for path, _, _ in results]
+    longest = max(len(name) for name in names)
+    for path, size, is_directory in results:
+        raw_name = os.path.basename(path)
+        name = colored_name(path, is_directory, color)
+        padding = " " * (longest - len(raw_name) + 2)
+        print(name + padding + human_size(size))
 
-def scan_entry(entry, state, fancy=False, ui=None):
+def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache:Cache =None):
+    # get filepath(the last one aft the /)
     state.current = os.path.abspath(entry.path)
     state.scanned_entries += 1
     try:
+        # symlink discover and return
         if entry.is_symlink():
             try:
                 size = entry.stat(follow_symlinks=False).st_size
@@ -143,14 +201,31 @@ def scan_entry(entry, state, fancy=False, ui=None):
 
             return size, False
 
+        # dir discover and recurse
         if entry.is_dir(follow_symlinks=False):
+            mtime = entry.stat(follow_symlinks=False).st_mtime
+            cached_size = cache.get(entry.path, mtime) if cache else None
+            if cached_size != None:
+                state.dirs += 1
+                state.bytes += cached_size
+                if fancy:
+                    ui.discover(entry.path, True)
+                    ui.update(state)
+                return cached_size, True
             state.dirs += 1
             total_size = 0
             try:
                 with os.scandir(entry.path) as entries:
                     for child in entries:
-                        child_size, _ = scan_entry(child, state, fancy, ui)
+                        child_size, _ = scan_entry(child, state, fancy, ui, cache)
                         total_size += child_size
+
+                stats = entry.stat(follow_symlinks=False)
+                size = total_size
+                mtime = stats.st_mtime
+                path = entry.path
+
+                cache.put(path, size, mtime)
 
             except OSError:
                 pass
@@ -162,6 +237,7 @@ def scan_entry(entry, state, fancy=False, ui=None):
 
             return total_size, True
 
+        # normal file and get size
         try:
             size = entry.stat(follow_symlinks=False).st_size
 
@@ -209,181 +285,180 @@ class Normal:
         )
 
 def cut(text, width):
-	if width <= 1:
-		return text[:max(width, 0)]
-	if len(text) <= width:
-		return text
-	return text[: width - 1] + "…"
+    if width <= 1:
+        return text[:max(width, 0)]
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
 
 class Fancy:
-	def __init__(self, color, discovery_lines=None, threshold=1000):
-		self.color = color
-		self.discovery_lines = []
-		self.printQ = 0
-		self.threshold = threshold
-		if discovery_lines == None:
-			self.terminal_height = shutil.get_terminal_size().lines
-			self.discovery_line = self.terminal_height - 9
-		else:
-			self.terminal_height = discovery_lines + 9
-			self.discovery_line = discovery_lines
-		for _ in range(self.discovery_line):
-			self.discovery_lines.append(("", False))
+    def __init__(self, color, discovery_lines=None, threshold=1000):
+        self.color = color
+        self.discovery_lines = []
+        self.printQ = 0
+        self.threshold = threshold
+        if discovery_lines is None:
+            self.discovery_line = max(1, int(shutil.get_terminal_size().lines * 0.1))
+        else:
+            self.discovery_line = discovery_lines
+        self.terminal_height = self.discovery_line + 9
+        for _ in range(self.discovery_line):
+            self.discovery_lines.append(("", False))
 
-	def update(self, state):
-		if self.printQ >= self.threshold:
-			self.print_progress(state)
-			self.printQ = 0
-		else:
-			self.printQ += 1
+    def update(self, state):
+        if self.printQ >= self.threshold:
+            self.print_progress(state)
+            self.printQ = 0
+        else:
+            self.printQ += 1
 
-	def discover(self, path, is_directory):
-		self.discovery_lines.append((display_path(path), is_directory))
+    def discover(self, path, is_directory):
+        self.discovery_lines.append((display_path(path), is_directory))
 
-		if len(self.discovery_lines) > self.discovery_line:
-			self.discovery_lines.pop(0)
+        if len(self.discovery_lines) > self.discovery_line:
+            self.discovery_lines.pop(0)
 
-	def is_dir(self, path):
-		try:
-			return os.path.isdir(path)
-		except OSError:
-			return False
+    def is_dir(self, path):
+        try:
+            return os.path.isdir(path)
+        except OSError:
+            return False
 
-	def print_progress(self, state):
-		# Move to beginning of dashboard
-		print(f"\033[{self.terminal_height-1}A", end="")
-		# Erase everything below cursor.
-		print("\033[0J", end="")
-		if state.top_total == 0:
-			percent = 100.0
+    def print_progress(self, state):
+        # Move to beginning of dashboard
+        print(f"\033[{self.terminal_height-1}A", end="")
+        # Erase everything below cursor.
+        print("\033[0J", end="")
+        if state.top_total == 0:
+            percent = 100.0
 
-		else:
-			percent = state.top_done / state.top_total * 100
+        else:
+            percent = state.top_done / state.top_total * 100
 
-		width = 30
-		filled = int(width * percent / 100)
-		bar = "█" * filled + "░" * (width - filled)
-		cols = shutil.get_terminal_size().columns
-		scanning_line = f"Scanning {display_path(state.current)}"
-		print(cut(scanning_line, cols))
+        width = 30
+        filled = int(width * percent / 100)
+        bar = "█" * filled + "░" * (width - filled)
+        cols = shutil.get_terminal_size().columns
+        scanning_line = f"Scanning {display_path(state.current)}"
+        print(cut(scanning_line, cols))
 
-		print(f"{bar} {percent:5.1f}%")
-		print(
-			f"Top-level "
-			f"{state.top_done}/{state.top_total}"
-			f"	{human_speed(scan_speed(state))}"
-		)
-		print(f"Files {state.files:,}")
-		print(f"Dirs  {state.dirs:,}")
-		print(f"Size  {human_size(state.bytes)}")
-		print()
-		print("Recently discovered")
-		self.print_discoveries()
+        print(f"{bar} {percent:5.1f}%")
+        print(
+            f"Top-level "
+            f"{state.top_done}/{state.top_total}"
+            f"    {human_speed(scan_speed(state))}"
+        )
+        print(f"Files {state.files:,}")
+        print(f"Dirs  {state.dirs:,}")
+        print(f"Size  {human_size(state.bytes)}")
+        print()
+        print("Recently discovered")
+        self.print_discoveries()
 
-	def print_discoveries(self):
-		for path, is_directory in self.discovery_lines:
-			if self.color:
-				print(colored_name(path, is_directory, True))
+    def print_discoveries(self):
+        for path, is_directory in self.discovery_lines:
+            if self.color:
+                print(colored_name(path, is_directory, True))
 
-			else:
-				print(path)
+            else:
+                print(path)
 
 def parse_args(argv):
-	fancy = False
-	color = False
-	lines = None
+    fancy = False
+    color = False
+    lines = None
 
-	directory = "."
+    directory = "."
 
-	for arg in argv[1:]:
-		if arg == "--lines":
-			continue
+    for arg in argv[1:]:
+        if arg == "--lines":
+            continue
 
-		if arg.startswith("--lines="):
-			try:
-				lines = int(arg.split("=", 1)[1])
-			except ValueError:
-				print(f"lsz: invalid value for --lines", file=sys.stderr)
-				sys.exit(2)
-			continue
+        if arg.startswith("--lines="):
+            try:
+                lines = int(arg.split("=", 1)[1])
+            except ValueError:
+                print(f"lsz: invalid value for --lines", file=sys.stderr)
+                sys.exit(2)
+            continue
 
-		if arg == "--fancy":
-			fancy = True
-			continue
+        if arg == "--fancy":
+            fancy = True
+            continue
 
-		if arg == "--color":
-			color = True
-			continue
+        if arg == "--color":
+            color = True
+            continue
 
-		if arg == "--no-color":
-			color = False
-			continue
+        if arg == "--no-color":
+            color = False
+            continue
 
-		if arg.startswith("-") and arg != "-":
-			for flag in arg[1:]:
-				if flag == "f":
-					fancy = True
+        if arg.startswith("-") and arg != "-":
+            for flag in arg[1:]:
+                if flag == "f":
+                    fancy = True
 
-				elif flag == "C":
-					color = True
+                elif flag == "C":
+                    color = True
 
-				elif flag == "c":
-					color = False
+                elif flag == "c":
+                    color = False
 
-				else:
-					print(f"lsz: unknown option " f"'-{flag}'", file=sys.stderr)
-					sys.exit(2)
+                else:
+                    print(f"lsz: unknown option " f"'-{flag}'", file=sys.stderr)
+                    sys.exit(2)
 
-		else:
-			directory = arg
-			break
+        else:
+            directory = arg
+            break
 
-	return fancy, color, directory, lines
+    return fancy, color, directory, lines
 
 def main():
-	fancy, color, directory, lines = parse_args(sys.argv)
-	lines = 10
-	directory = os.path.abspath(os.path.expanduser(directory))
-	if not os.path.isdir(directory):
-		print(f"lsz: '{directory}' " f"is not a directory", file=sys.stderr)
-		sys.exit(1)
+    fancy, color, directory, lines = parse_args(sys.argv)
+    cache = Cache("LSZ.sqlite")
+    directory = os.path.abspath(os.path.expanduser(directory))
+    if not os.path.isdir(directory):
+        print(f"lsz: '{directory}' " f"is not a directory", file=sys.stderr)
+        sys.exit(1)
 
-	try:
-		entries = list(os.scandir(directory))
+    try:
+        entries = list(os.scandir(directory))
 
-	except OSError as e:
-		print(f"lsz: cannot read " f"'{display_path(directory)}': {e}", file=sys.stderr)
-		sys.exit(1)
+    except OSError as e:
+        print(f"lsz: cannot read " f"'{display_path(directory)}': {e}", file=sys.stderr)
+        sys.exit(1)
 
-	state = ScanState(len(entries))
+    state = ScanState(len(entries))
 
-	if fancy:
-		ui = Fancy(color, lines)
-		print("\n"*(ui.discovery_line+7))
+    if fancy:
+        ui = Fancy(color, lines)
+        print("\n"*(ui.discovery_line+7))
 
-	else:
-		ui = Normal(color)
+    else:
+        ui = Normal(color)
 
-	for entry in entries:
-		size, is_directory = scan_entry(entry, state, fancy, ui)
-		state.results.append((os.path.abspath(entry.path), size, is_directory))
-		state.top_done += 1
-		ui.update(state)
+    for entry in entries:
+        size, is_directory = scan_entry(entry, state, fancy, ui, cache)
+        cache.db.commit()
+        state.results.append((os.path.abspath(entry.path), size, is_directory))
+        state.top_done += 1
+        ui.update(state)
 
-	if fancy:
-		# print("\033[0J", end="")
-		print()
+    if fancy:
+        print()
 
-	else:
-		print()
-	sort_results(state.results)
-	if fancy:
-		print(f"\033[{ui.discovery_line+9}A", end="")
-		print(f"\033[J", end="")
-	else:
-		print(f"\033[2A")
-		print(f"\033[J",end="")
-	print_results(state.results, color)
+    else:
+        print()
+    sort_results(state.results)
+    if fancy:
+        print(f"\033[{ui.discovery_line+9}A", end="")
+        print(f"\033[J", end="")
+    else:
+        print(f"\033[2A")
+        print(f"\033[J",end="")
+    print_results(state.results, color)
 
 if __name__ == "__main__":
-	main()
+    main()

@@ -11,9 +11,12 @@ init:
 	# 4. Create the symlink to /usr/bin/lsz
 	@echo "Creating system symlink (sudo password may be required)..."
 	sudo ln -sf ~/.local/bin/lsz /usr/bin/lsz
+	@echo "Creating cache folder & file"
+	mkdir ~/.cache/LSZ
 	@echo "Installation complete! Type 'lsz' to run."
 clean:
 	@echo "Removing lsz installation..."
 	rm -f ~/.local/bin/lsz
 	sudo rm -f /usr/bin/lsz
+	sudo rm -rf ~/.cache/LSZ
 	@echo "Clean complete."
