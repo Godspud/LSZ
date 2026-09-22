@@ -42,15 +42,47 @@ use on a dir:
 lsz ~/Downloads
 ```
 
-### OOH fancyy
+## flags
 
-`-f` or `--fancy` makes it go fancy
+```-f```
+enables fancy mode
 
-### colorful
+```-c```
+enables color
 
-`-C` or `--color` makes it hv color(using ls colors)
+```-C```
+dont use cache
 
-`-c` or `--no-color` make it all be terminal default color
+```--fancy```
+same as ```-f```
+
+```--color```
+same as ```-c```
+
+```--no-color```
+inverse of ```-c``` will not have color(default)
+
+```--lines="$no_of_lines"```
+where ```"$no_of_lines``` is the number of discovery lines(only with ```-f```)
+
+```--no-cache```
+dont use cache same as ```-C```
+
+```--cache-file="$cache_file_name"```
+the cache file used will be ```"~/.cache/LSZ/lsz.sqlite"+"$cache_file_name"``` instead of ```"~/.cache/LSZ/lsz.sqlite"```
+
+```--reset-time="$time"```
+default is 8 days
+reset time is time till the old rows(created older than this time) are deleted ```"$time"``` is in seconds
+the deletion only happens when u run `lsz` or `lsz --prune-cache`
+
+```--clean-cache```
+nukes the cache and exits
+note will conflict with ```--no-cache```
+
+```--prune-cache```
+delete entries in cache that are older than the reset time and exits
+note will conflict with ```--no-cache```
 
 ## uninstall(pls no)
 
@@ -67,7 +99,6 @@ make clean
 
 * Configurable sorting modes
 * More `ls`-compatible options
-* Improved performance for very large directories (caching)
 * Parallel directory scanning
 * Configurable size units
 * Better terminal resizing behaviour

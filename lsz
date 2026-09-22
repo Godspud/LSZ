@@ -8,11 +8,10 @@ from pathlib import Path
 
 RESET = "\033[0m"
 
-global time_till_redo_cache
-time_till_redo_cache = 8 * 86400 # s
-
 class Cache:
-    def __init__(self, path: str):
+
+    def __init__(self, path: str, reset_time: float = 8 * 86400):
+        self.time_till_redo_cache = reset_time
         home = Path.home()
         try:
             Path(f"{home}/.cache/LSZ/{path}").touch(exist_ok=True)
@@ -30,9 +29,19 @@ CREATE TABLE IF NOT EXISTS dirsize_cache (
 );
         """)
 
-    def put(
-        self, path: str, size: int, modified_time: int, checked_at: float = None
-    ):
+    def prune(self, older_than: float = None):
+        if older_than:
+            cutoff = time.time() - older_than
+        else:
+            cutoff = time.time() - self.time_till_redo_cache
+        self.db.execute("DELETE FROM dirsize_cache WHERE checked_at < ?", (cutoff,))
+        self.db.commit()
+
+    def clear(self):
+        self.db.execute("DELETE FROM dirsize_cache")
+        self.db.commit()
+
+    def put(self, path: str, size: int, modified_time: int, checked_at: float = None):
         if checked_at == None:
             checked_at = time.time()
         self.db.execute(
@@ -58,11 +67,12 @@ CREATE TABLE IF NOT EXISTS dirsize_cache (
         else:
             out = list(out)
             out.insert(0, path)
-        if (out[1] != mtime) or ((time.time() - out[3]) > time_till_redo_cache):
+        if (out[1] != mtime) or ((time.time() - out[3]) > self.time_till_redo_cache):
             return None
         return out[2]
 
 ls_colors_str = os.environ.get("LS_COLORS", "di=01;34:ln=01;36:ex=01;32:fi=00")
+
 class Color:
     MAP = dict(item.split("=", 1) for item in ls_colors_str.split(":") if "=" in item)
 
@@ -111,6 +121,7 @@ def human_size(size):
 
     return f"{size / 1000**4:.1f}TB"
 
+
 def human_speed(value):
     if value < 1000:
         return f"{value:.0f}B/s"
@@ -123,6 +134,7 @@ def human_speed(value):
 
     return f"{value / 1000**3:.1f}GB/s"
 
+
 def scan_speed(state):
     elapsed = time.monotonic() - state.start_time
 
@@ -130,6 +142,7 @@ def scan_speed(state):
         return 0
 
     return state.scanned_entries / elapsed
+
 
 def display_path(path):
     path = os.path.abspath(path)
@@ -143,8 +156,10 @@ def display_path(path):
 
     return path
 
+
 def sort_results(results):
     results.sort(key=lambda x: (not x[2], -x[1]))
+
 
 class ScanState:
     def __init__(self, top_total):
@@ -167,6 +182,7 @@ class ScanState:
 
         self.printQ = 0
 
+
 def print_results(results, color):
     if not results:
         return
@@ -179,7 +195,8 @@ def print_results(results, color):
         padding = " " * (longest - len(raw_name) + 2)
         print(name + padding + human_size(size))
 
-def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache:Cache =None):
+
+def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache: Cache = None):
     # get filepath(the last one aft the /)
     state.current = os.path.abspath(entry.path)
     state.scanned_entries += 1
@@ -203,8 +220,12 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache:Cache =Non
 
         # dir discover and recurse
         if entry.is_dir(follow_symlinks=False):
-            mtime = entry.stat(follow_symlinks=False).st_mtime
-            cached_size = cache.get(entry.path, mtime) if cache else None
+            try:
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+                cached_size = cache.get(entry.path, mtime) if cache else None
+            except OSError:
+                mtime = None
+                cached_size = None
             if cached_size != None:
                 state.dirs += 1
                 state.bytes += cached_size
@@ -220,12 +241,11 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache:Cache =Non
                         child_size, _ = scan_entry(child, state, fancy, ui, cache)
                         total_size += child_size
 
-                stats = entry.stat(follow_symlinks=False)
                 size = total_size
-                mtime = stats.st_mtime
                 path = entry.path
 
-                cache.put(path, size, mtime)
+                if cache:
+                    cache.put(path, size, mtime)
 
             except OSError:
                 pass
@@ -254,6 +274,7 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache:Cache =Non
 
     except OSError:
         return 0, False
+
 
 class Normal:
     def __init__(self, color):
@@ -284,12 +305,14 @@ class Normal:
             flush=True,
         )
 
+
 def cut(text, width):
     if width <= 1:
-        return text[:max(width, 0)]
+        return text[: max(width, 0)]
     if len(text) <= width:
         return text
     return text[: width - 1] + "…"
+
 
 class Fancy:
     def __init__(self, color, discovery_lines=None, threshold=1000):
@@ -317,12 +340,6 @@ class Fancy:
 
         if len(self.discovery_lines) > self.discovery_line:
             self.discovery_lines.pop(0)
-
-    def is_dir(self, path):
-        try:
-            return os.path.isdir(path)
-        except OSError:
-            return False
 
     def print_progress(self, state):
         # Move to beginning of dashboard
@@ -363,15 +380,31 @@ class Fancy:
             else:
                 print(path)
 
+
 def parse_args(argv):
     fancy = False
     color = False
     lines = None
+    clean_cache = False
+    prune_cache = False
+    use_cache = "LSZ.sqlite"
+    reset_time = None
+    error = False
 
     directory = "."
 
     for arg in argv[1:]:
         if arg == "--lines":
+            continue
+
+        if arg == ("--cache-file"):
+            print("lsz: cache file required with --cache-file", file=sys.stderr)
+            error = True
+            continue
+
+        if arg == ("--reset-time"):
+            print("lsz: --reset-time requires a value", file=sys.stderr)
+            error = True
             continue
 
         if arg.startswith("--lines="):
@@ -380,6 +413,34 @@ def parse_args(argv):
             except ValueError:
                 print(f"lsz: invalid value for --lines", file=sys.stderr)
                 sys.exit(2)
+            continue
+
+        if arg.startswith("--cache-file="):
+            use_cache = arg.split("=", 1)[1]
+            if use_cache[0] == '"' and use_cache[-1] == '"':
+                use_cache = use_cache[1:-1]
+            elif use_cache[0] == "'" and use_cache[-1] == "'":
+                use_cache = use_cache[1:-1]
+            continue
+
+        if arg.startswith("--reset-time="):
+            try:
+                reset_time = int(arg.split("=", 1)[1])
+            except ValueError:
+                print(f"lsz: invalid value for --reset-time", file=sys.stderr)
+                sys.exit(2)
+            continue
+
+        if arg == "--prune-cache":
+            prune_cache=True
+            continue
+
+        if arg == "--clean-cache":
+            clean_cache = True
+            continue
+
+        if arg == "--no-cache":
+            use_cache = None
             continue
 
         if arg == "--fancy":
@@ -400,10 +461,10 @@ def parse_args(argv):
                     fancy = True
 
                 elif flag == "C":
-                    color = True
+                    use_cache = None
 
                 elif flag == "c":
-                    color = False
+                    color = True
 
                 else:
                     print(f"lsz: unknown option " f"'-{flag}'", file=sys.stderr)
@@ -413,11 +474,34 @@ def parse_args(argv):
             directory = arg
             break
 
-    return fancy, color, directory, lines
+    if error:
+        sys.exit(2)
+
+    return fancy, color, directory, lines, use_cache, clean_cache, prune_cache, reset_time
+
 
 def main():
-    fancy, color, directory, lines = parse_args(sys.argv)
-    cache = Cache("LSZ.sqlite")
+    fancy, color, directory, lines, cache, clean_cache, prune_cache, reset_time = parse_args(
+        sys.argv
+    )
+    if (clean_cache or prune_cache) and cache == None:
+        print("lsz: --clean-cache/--prune-cache and --no-cache can't be used together", file=sys.stderr)
+        sys.exit(2)
+
+    if cache != None:
+        if reset_time != None:
+            cache = Cache(cache, reset_time)
+        else:
+            cache = Cache(cache)
+    if prune_cache:
+        cache.prune()
+        print("cache prune sucess")
+        sys.exit(0)
+    if clean_cache:
+        cache.clear()
+        print("cache clean sucess")
+        sys.exit(0)
+
     directory = os.path.abspath(os.path.expanduser(directory))
     if not os.path.isdir(directory):
         print(f"lsz: '{directory}' " f"is not a directory", file=sys.stderr)
@@ -434,14 +518,15 @@ def main():
 
     if fancy:
         ui = Fancy(color, lines)
-        print("\n"*(ui.discovery_line+7))
+        print("\n" * (ui.discovery_line + 7))
 
     else:
         ui = Normal(color)
 
     for entry in entries:
         size, is_directory = scan_entry(entry, state, fancy, ui, cache)
-        cache.db.commit()
+        if cache:
+            cache.db.commit()
         state.results.append((os.path.abspath(entry.path), size, is_directory))
         state.top_done += 1
         ui.update(state)
@@ -457,8 +542,9 @@ def main():
         print(f"\033[J", end="")
     else:
         print(f"\033[2A")
-        print(f"\033[J",end="")
+        print(f"\033[J", end="")
     print_results(state.results, color)
+
 
 if __name__ == "__main__":
     main()
