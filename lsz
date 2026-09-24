@@ -13,24 +13,23 @@ class Cache:
     def __init__(self, path: str, reset_time: float = 8 * 86400):
         self.time_till_redo_cache = reset_time
         home = Path.home()
-        try:
-            Path(f"{home}/.cache/LSZ/{path}").touch(exist_ok=True)
-        except FileNotFoundError:
-            Path(f"{home}/.cache/LSZ").mkdir(exist_ok=True, parents=True)
-            Path(f"{home}/.cache/LSZ/{path}").touch(exist_ok=True)
-        self.path = path
-        self.db = sqlite3.connect(f"{home}/.cache/LSZ/{path}")
+        cache_path = Path(path)
+        if not cache_path.is_absolute():
+            cache_path = home / ".cache" / "LSZ" / cache_path
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = str(cache_path)
+        self.db = sqlite3.connect(cache_path, timeout=25.0) # 25s
         self.db.execute("""
 CREATE TABLE IF NOT EXISTS dirsize_cache (
     path TEXT PRIMARY KEY,
     mtime REAL NOT NULL,
     size INTEGER NOT NULL,
     checked_at REAL NOT NULL
-);
-        """)
+);""")
 
     def prune(self, older_than: float = None):
-        if older_than:
+        if older_than != None:
             cutoff = time.time() - older_than
         else:
             cutoff = time.time() - self.time_till_redo_cache
@@ -42,6 +41,7 @@ CREATE TABLE IF NOT EXISTS dirsize_cache (
         self.db.commit()
 
     def put(self, path: str, size: int, modified_time: int, checked_at: float = None):
+        path = os.path.abspath(path)
         if checked_at == None:
             checked_at = time.time()
         self.db.execute(
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS dirsize_cache (
         self.db.commit()
 
     def get(self, path: str, mtime):
+        path = os.path.abspath(path)
         out = self.db.execute(
             """SELECT mtime, size, checked_at FROM dirsize_cache WHERE path = ?""",
             (path,),
@@ -64,12 +65,13 @@ CREATE TABLE IF NOT EXISTS dirsize_cache (
         out = out.fetchone()
         if not out:
             return None
-        else:
-            out = list(out)
-            out.insert(0, path)
-        if (out[1] != mtime) or ((time.time() - out[3]) > self.time_till_redo_cache):
+        cached_mtime, cached_size, checked_at = out
+        if (
+            cached_mtime != mtime
+            or (time.time() - checked_at) > self.time_till_redo_cache
+        ):
             return None
-        return out[2]
+        return cached_size
 
 ls_colors_str = os.environ.get("LS_COLORS", "di=01;34:ln=01;36:ex=01;32:fi=00")
 
@@ -217,7 +219,7 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache: Cache = N
                 ui.update(state)
 
             return size, False
-
+        
         # dir discover and recurse
         if entry.is_dir(follow_symlinks=False):
             try:
@@ -240,21 +242,19 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache: Cache = N
                     for child in entries:
                         child_size, _ = scan_entry(child, state, fancy, ui, cache)
                         total_size += child_size
-
                 size = total_size
                 path = entry.path
-
-                if cache:
+                if cache and mtime != None:
                     cache.put(path, size, mtime)
-
             except OSError:
                 pass
-
+            except sqlite3.OperationalError:
+                print("lsz: please wait for a second another instance is running")
+                sys.exit(2)
             state.bytes += total_size
             if fancy:
                 ui.discover(entry.path, True)
                 ui.update(state)
-
             return total_size, True
 
         # normal file and get size
@@ -320,7 +320,7 @@ class Fancy:
         self.discovery_lines = []
         self.printQ = 0
         self.threshold = threshold
-        if discovery_lines is None:
+        if discovery_lines == None:
             self.discovery_line = max(1, int(shutil.get_terminal_size().lines * 0.1))
         else:
             self.discovery_line = discovery_lines
