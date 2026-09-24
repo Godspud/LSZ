@@ -9,7 +9,6 @@ from pathlib import Path
 RESET = "\033[0m"
 
 class Cache:
-
     def __init__(self, path: str, reset_time: float = 8 * 86400):
         self.time_till_redo_cache = reset_time
         home = Path.home()
@@ -108,35 +107,6 @@ def colored_name(path, is_directory, color):
 
     return Color.get(key) + name + RESET
 
-def human_size(size):
-    if size < 1000:
-        return f"{size}B"
-
-    if size < 1000**2:
-        return f"{size / 1000:.1f}KB"
-
-    if size < 1000**3:
-        return f"{size / 1000**2:.1f}MB"
-
-    if size < 1000**4:
-        return f"{size / 1000**3:.1f}GB"
-
-    return f"{size / 1000**4:.1f}TB"
-
-
-def human_speed(value):
-    if value < 1000:
-        return f"{value:.0f}B/s"
-
-    if value < 1000**2:
-        return f"{value / 1000:.1f}kB/s"
-
-    if value < 1000**3:
-        return f"{value / 1000**2:.1f}MB/s"
-
-    return f"{value / 1000**3:.1f}GB/s"
-
-
 def scan_speed(state):
     elapsed = time.monotonic() - state.start_time
 
@@ -144,7 +114,6 @@ def scan_speed(state):
         return 0
 
     return state.scanned_entries / elapsed
-
 
 def display_path(path):
     path = os.path.abspath(path)
@@ -158,10 +127,8 @@ def display_path(path):
 
     return path
 
-
 def sort_results(results):
     results.sort(key=lambda x: (not x[2], -x[1]))
-
 
 class ScanState:
     def __init__(self, top_total):
@@ -184,7 +151,6 @@ class ScanState:
 
         self.printQ = 0
 
-
 def print_results(results, color):
     if not results:
         return
@@ -196,7 +162,6 @@ def print_results(results, color):
         name = colored_name(path, is_directory, color)
         padding = " " * (longest - len(raw_name) + 2)
         print(name + padding + human_size(size))
-
 
 def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache: Cache = None):
     # get filepath(the last one aft the /)
@@ -275,10 +240,11 @@ def scan_entry(entry: os.DirEntry, state, fancy=False, ui=None, cache: Cache = N
     except OSError:
         return 0, False
 
-
 class Normal:
-    def __init__(self, color):
+    def __init__(self, color=False, unit_type=None, unit=None):
         self.color = color
+        self.unit_type = unit_type
+        self.unit = unit
 
     def update(self, state):
         self.print_progress(state)
@@ -300,11 +266,10 @@ class Normal:
             f"  {human_speed(scan_speed(state))}"
             f"  Files {state.files:,}"
             f"  Dirs {state.dirs:,}"
-            f"  Size {human_size(state.bytes)}",
+            f"  Size {human_size(state.bytes, self.unit_type, self.unit)}",
             end="",
             flush=True,
         )
-
 
 def cut(text, width):
     if width <= 1:
@@ -313,11 +278,12 @@ def cut(text, width):
         return text
     return text[: width - 1] + "…"
 
-
 class Fancy:
-    def __init__(self, color, discovery_lines=None, threshold=1000):
+    def __init__(self, color, discovery_lines=None, unit_type=None, unit=None,threshold=1000):
         self.color = color
         self.discovery_lines = []
+        self.unit_type = unit_type
+        self.unit = unit
         self.printQ = 0
         self.threshold = threshold
         if discovery_lines == None:
@@ -367,7 +333,7 @@ class Fancy:
         )
         print(f"Files {state.files:,}")
         print(f"Dirs  {state.dirs:,}")
-        print(f"Size  {human_size(state.bytes)}")
+        print(f"Size  {human_size(state.bytes, self.unit_type, self.unit)}")
         print()
         print("Recently discovered")
         self.print_discoveries()
@@ -380,6 +346,24 @@ class Fancy:
             else:
                 print(path)
 
+def print_help():
+    print("""Usage: lsz [OPTIONS] [DIRECTORY]
+
+Recursively report directory and file sizes, sorted largest first.
+
+Options:
+  -f, --fancy                           Show a live dashboard while scanning
+  -C, --no-cache                        Skip the cache entirely for this run
+  -c, --color                           Enable colored output
+      --no-color                        Disable colored output
+      --lines="$no_of_lines"            Number of discovery lines shown in fancy mode
+      --cache-file="$cache_file_name"   Use a custom cache filename (default: LSZ.sqlite)
+      --reset-time="$time_till_reset"   Cache reset time in seconds (default: 691200, 8 days)
+      --clean-cache                     Wipe the entire cache and exit
+      --prune-cache                     Delete cache entries older than the reset time and exit
+  -h, --help                            how this help message and exit
+
+  DIRECTORY defaults to the current directory.""")
 
 def parse_args(argv):
     fancy = False
@@ -390,21 +374,50 @@ def parse_args(argv):
     use_cache = "LSZ.sqlite"
     reset_time = None
     error = False
+    unit_type = False
+    unit = None
 
     directory = "."
 
     for arg in argv[1:]:
-        if arg == "--lines":
+        if arg == "--help" or arg == "-h":
+            print_help()
+            sys.exit(0)
+
+        if arg == "--unit" or arg == "--unit=":
+            print("lsz: requires a unit", file=sys.stderr)
+            error = True
             continue
 
-        if arg == ("--cache-file"):
+        if arg == "--lines" or arg == "--lines=":
+            print("lsz: requies amount of discovery lines to show", file=sys.stderr)
+            error = True
+            continue
+
+        if arg == "--cache-file" or arg == "--cache-file=":
             print("lsz: cache file required with --cache-file", file=sys.stderr)
             error = True
             continue
 
-        if arg == ("--reset-time"):
+        if arg == "--reset-time" or arg == "--reset-time=":
             print("lsz: --reset-time requires a value", file=sys.stderr)
             error = True
+            continue
+
+        if arg.startswith("--unit="):
+            unit = arg.split("=", 1)[1]
+            if not unit:
+                print("lsz: --unit requires a value", file=sys.stderr)
+                error = True
+                continue
+            if unit[0] == '"' and unit[-1] == '"':
+                unit = unit[1:-1]
+            elif unit[0] == "'" and unit[-1] == "'":
+                unit = unit[1:-1]
+            valid_units = {"KB", "MB", "GB", "TB", "kB"}
+            if unit not in valid_units:
+                print(f"lsz: invalid unit '{unit}'\nvalid units: kB KB MB GB TB", file=sys.stderr)
+                error = True
             continue
 
         if arg.startswith("--lines="):
@@ -429,6 +442,10 @@ def parse_args(argv):
             except ValueError:
                 print(f"lsz: invalid value for --reset-time", file=sys.stderr)
                 sys.exit(2)
+            continue
+
+        if arg == "--si":
+            unit_type = True
             continue
 
         if arg == "--prune-cache":
@@ -457,6 +474,9 @@ def parse_args(argv):
 
         if arg.startswith("-") and arg != "-":
             for flag in arg[1:]:
+                if flag == "h":
+                    print_help()
+                    sys.exit(0)
                 if flag == "f":
                     fancy = True
 
@@ -477,11 +497,10 @@ def parse_args(argv):
     if error:
         sys.exit(2)
 
-    return fancy, color, directory, lines, use_cache, clean_cache, prune_cache, reset_time
-
+    return fancy, color, directory, lines, use_cache, clean_cache, prune_cache, reset_time, unit_type, unit
 
 def main():
-    fancy, color, directory, lines, cache, clean_cache, prune_cache, reset_time = parse_args(
+    fancy, color, directory, lines, cache, clean_cache, prune_cache, reset_time, unit_type, unit = parse_args(
         sys.argv
     )
     if (clean_cache or prune_cache) and cache == None:
@@ -517,11 +536,11 @@ def main():
     state = ScanState(len(entries))
 
     if fancy:
-        ui = Fancy(color, lines)
+        ui = Fancy(color, lines, unit_type, unit)
         print("\n" * (ui.discovery_line + 7))
 
     else:
-        ui = Normal(color)
+        ui = Normal(color, unit_type, unit)
 
     for entry in entries:
         size, is_directory = scan_entry(entry, state, fancy, ui, cache)
@@ -544,6 +563,29 @@ def main():
         print(f"\033[2A")
         print(f"\033[J", end="")
     print_results(state.results, color)
+
+def human_size(size, units=False, force_unit=None):
+    lookup = (
+        {"TB": 1000**4, "GB": 1000**3, "MB": 1000**2, "kB": 1000}
+        if units
+        else {"TB": 1024**4, "GB": 1024**3, "MB": 1024**2, "KB": 1024}
+    )
+
+    if force_unit:
+        try:
+            return f"{size / lookup[force_unit]:.1f}{force_unit}"
+        except IndexError:
+            print("lsz: invalid unit for size")
+            sys.exit(2)
+
+    for unit, divisor in lookup.items():
+        if size >= divisor:
+            return f"{size / divisor:.1f}{unit}"
+
+    return f"{size}B"
+
+def human_speed(value, force_unit=None):
+    return f"{human_size(value, True, force_unit=force_unit)}/s"
 
 
 if __name__ == "__main__":
