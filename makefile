@@ -1,4 +1,4 @@
-.PHONY: init clean
+.PHONY: init clean update
 
 init:
 	@echo "Installing lsz..."
@@ -16,3 +16,6 @@ clean:
 	sudo rm -f /usr/bin/lsz
 	sudo rm -rf ~/.cache/LSZ
 	@echo "Clean complete."
+update:
+	make clean
+	make init

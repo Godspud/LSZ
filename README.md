@@ -115,7 +115,6 @@ make clean
 * Configurable sorting modes
 * More `ls`-compatible options
 * Parallel directory scanning
-* Better terminal resizing behaviour
 * More detailed file metadata
 * Optional disk-usage mode
-* Configuration file
+* make the width of the progress bar depend of the width of the terminal
